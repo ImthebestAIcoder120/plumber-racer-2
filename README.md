@@ -4,7 +4,7 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-**[Mario Kart World](dm/games/0400C3F00006E000/README.md)** runs on an iPhone 18 Pro in LiveContainer: version 1.0.0 only, from your own dump, with its build and install steps in its note. Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) plays on the Mac, packed from a dump of the game; iPhone and iPad are untested.
+**[Mario Kart World](dm/games/0400C3F00006E000/README.md)** runs on an iPhone 18 Pro in LiveContainer: version 1.0.0 only, from your own dump. To play it, follow the **[install tutorial](TUTORIAL.md)**. Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) plays on the Mac, packed from a dump of the game; iPhone and iPad are untested.
 
 ## Acknowledgements
 
