@@ -1,6 +1,6 @@
-# Mario Kart World on iPhone: install tutorial
+# Plumber Racer 2: install tutorial
 
-This guide takes you from your own copy of the game to playing it on your iPhone: you build an app on a Mac, install it in LiveContainer, and copy the game files across.
+Plumber Racer 2 runs Mario Kart World on an iPhone. This guide takes you from your own copy of the game to playing it: you build an app on a Mac, install it in LiveContainer, and copy the game files across.
 
 **This repository has no game files, keys or ready-made apps.** You need your own dump of the game. The app and the `RomFS.img` file you make here contain your game, so keep them to yourself.
 
@@ -71,11 +71,11 @@ You only do this once.
 4. Download this repository and go into it:
 
    ```bash
-   git clone https://github.com/cheemu21/mario-kart-world-native.git
+   git clone https://github.com/cheemu21/plumber-racer-2.git
    ```
 
    ```bash
-   cd mario-kart-world-native
+   cd plumber-racer-2
    ```
 
 5. Install the build tools:

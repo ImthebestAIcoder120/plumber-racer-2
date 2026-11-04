@@ -1,4 +1,8 @@
-# nxnative
+# Plumber Racer 2
+
+Mario Kart World on iPhone, built on [nxnative](https://github.com/seedds/nxnative). It needs your own dump of version 1.0.0 (base game, no update or DLC; `main` build ID `9e244438c3d8ef1c703a6a85ef99c4f0`). No game files are included. **Start with the [install tutorial](TUTORIAL.md).**
+
+The rest of this page is nxnative's.
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
 
