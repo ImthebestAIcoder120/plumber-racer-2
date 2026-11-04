@@ -9,6 +9,9 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <mach/mach.h>
+#include <fcntl.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -37,8 +40,35 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
+// Profile mem_file: the guest block is a shared mapping of a file (a sparse one, unlinked at once), not anonymous memory. The system counts what a process wrote into a
+// file it maps as the file's (external), not the process's: a phys_footprint limit (the iPhone's, about 6 GB in LiveContainer for Mario Kart World) leaves it out, and
+// under memory pressure the kernel writes such pages to the file and reads them back on use, as swap, while there is room they stay in memory as before (measured on the
+// Mac: 2 GB written = 2 MB of footprint, 2,055 MB external; a no-copy Metal buffer over it is made, read by the GPU and charges nothing). Memory goes back by punching a hole
+// in the file (guest_release): that range reads as zeros and holds no disk blocks. DM_MEM_FILE=0 / 1 overrides, also from Documents/env.txt; DM_MEM_FILE_DIR the folder
+// (default DM_TEMP's). With less than 4 GB free there, or when the file cannot be made, the block stays anonymous
+// A game's large pools must not get zero-copy buffers on iOS: a buffer's whole range is read into memory and wired when it goes into the residency set, and over file pages that froze
+// Mario Kart World for over a minute on an iPhone 18 Pro at its 2.4 GB main pool (anonymous: under a second) and took 16 s for a 7 MB pool on a Mac short of memory
+static int g_memfd = -1;
+int dm_guest_file_backed(void) { return g_memfd >= 0; }   // nvn_dirty.c nvn_dirty_release: nothing to give back
+static int mem_file_open(size_t size) {
+    const char *e = getenv("DM_MEM_FILE"); int on = e && *e ? atoi(e) != 0 : DM_GAME_MEM_FILE;
+    if (!on) return -1;
+    char dir[1024], path[1100]; const char *d = getenv("DM_MEM_FILE_DIR"); if (!d || !*d) d = getenv("DM_TEMP");
+    if (d && *d) snprintf(dir, sizeof dir, "%s", d); else if (!confstr(_CS_DARWIN_USER_TEMP_DIR, dir, sizeof dir)) snprintf(dir, sizeof dir, "/tmp");
+    mkdir(dir, 0700);
+    struct statfs fs; uint64_t avail = statfs(dir, &fs) ? 0 : (uint64_t)fs.f_bavail * fs.f_bsize;
+    if (avail < (4ull << 30)) { LOG("[RED] guest memory: %llu MB free in %s, under 4 GB: anonymous memory, all of it in the footprint", (unsigned long long)(avail >> 20), dir); return -1; }
+    snprintf(path, sizeof path, "%s/guest_memory.%d", dir, (int)getpid());
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { LOG("[RED] guest memory: %s not made (errno %d): anonymous memory", path, errno); return -1; }
+    unlink(path);
+    if (ftruncate(fd, (off_t)size)) { LOG("[RED] guest memory: file of %#zx bytes refused (errno %d): anonymous memory", size, errno); close(fd); return -1; }
+    LOG("guest memory: a shared mapping of an unlinked file in %s (%llu MB free there): out of the footprint, paged to the file under memory pressure", dir, (unsigned long long)(avail >> 20));
+    return fd;
+}
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
+static void *zero_sweep_thread(void *arg);
 static void mem_init_once(void) {
     size_t pg = (size_t)getpagesize();
     if (RESERVE < 0x10000000 || DM_GAME_MEM_ALIAS > RESERVE - 0x10000000 ||
@@ -50,7 +80,9 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
-    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    g_memfd = mem_file_open(g_reserve);
+    if (g_memfd >= 0 && (g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_SHARED, g_memfd, 0)) == MAP_FAILED) { LOG("[RED] guest memory: file mapping refused (errno %d): anonymous memory", errno); close(g_memfd); g_memfd = -1; }
+    if (g_memfd < 0) g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
@@ -66,6 +98,7 @@ static void mem_init_once(void) {
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
+    if (DM_GAME_ZERO_RELEASE && g_memfd < 0) { pthread_t th; if (!pthread_create(&th, NULL, zero_sweep_thread, NULL)) pthread_detach(th); }
     const char *rf = getenv("DM_REGIONS");
     if (rf && *rf) { pthread_t th; if (!pthread_create(&th, NULL, regions_thread, (void *)rf)) pthread_detach(th); }
 }
@@ -188,7 +221,77 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // out of phys_footprint, and madvise(MADV_FREE) does nothing to pages that are not writable, though it returns 0 (1 GiB on the Mac: 1,024 MiB still resident and dirty; this: 0).
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
 // on failure the range is only inaccessible, with its old bytes
+// Profile zero_release: guest pages that hold only zeros go back to the system, so they cost nothing until the game writes them again (a page the game touched once is charged in
+// full whether it wrote zeros or only read it: measured on the Mac, 256 MB read = 256 MB of footprint). Mario Kart World keeps about 1.1 GB of its 4 GB of resident guest memory as
+// all-zero pages, nearly all in memory pools the GPU never addresses as buffers (render-target storage: the host draws into textures of its own). Every 15 s a background thread
+// looks at the resident, private (a sparse pool's alias is not), writable pages of the guest block, outside the pools with a zero-copy buffer (which holds the pages under it, so
+// a new mapping would leave the GPU on the old ones: mtl_pool_unwrapped_do, which keeps one from being made meanwhile): a run of all-zero pages is set read-only, looked at again, and replaced
+// by a fresh mapping (MAP_FIXED), which reads as zeros as it did. A guest write meanwhile faults and waits in zs_fault until the new mapping is there, then lands in it; a host write
+// (a system call into guest memory) waits in zs_prep; a write before the page went read-only shows in the second look, and the run is left as it is
+__attribute__((weak)) size_t mtl_pool_unwrapped_do(uintptr_t lo, uintptr_t hi, size_t (*fn)(uintptr_t, uintptr_t)) { (void)lo; (void)hi; (void)fn; return 0; }   // nvn_mtl.m; without the graphics layer nothing goes
+static _Atomic uintptr_t g_zs_lo, g_zs_hi;   // the run being replaced (0: none)
+static _Atomic uint64_t g_zs_given;
+static int zs_fault(void *addr, int is_write, void *uc) {
+    (void)uc; uintptr_t a = (uintptr_t)addr, lo = atomic_load(&g_zs_lo), hi = atomic_load(&g_zs_hi);
+    if (!is_write || !lo || a < lo || a >= hi) return 0;
+    while (atomic_load(&g_zs_lo) == lo) sched_yield();
+    return 1;   // re-executed on the new mapping
+}
+static void zs_prep(void *addr, size_t len) {
+    uintptr_t a = (uintptr_t)addr, lo = atomic_load(&g_zs_lo), hi = atomic_load(&g_zs_hi);
+    if (lo && a < hi && a + len > lo) while (atomic_load(&g_zs_lo) == lo) sched_yield();
+}
+static int zs_zero(uintptr_t a, size_t n) { const uint64_t *w = (const uint64_t *)a; for (size_t k = 0; k < n / 8; k++) if (w[k]) return 0; return 1; }
+static size_t zs_run(uintptr_t lo, uintptr_t hi) {
+    atomic_store(&g_zs_hi, hi); atomic_store(&g_zs_lo, lo);
+    size_t got = 0;
+    if (!mprotect((void *)lo, hi - lo, PROT_READ)) {
+        if (zs_zero(lo, hi - lo) && mmap((void *)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) got = hi - lo;
+        else mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE);
+    }
+    atomic_store(&g_zs_lo, 0);
+    return got;
+}
+static void *zero_sweep_thread(void *arg) {
+    (void)arg; pthread_setname_np("dm zero pages"); pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    dm_fault_hook_register(zs_fault); dm_guest_write_prep_register(zs_prep);
+    size_t pg = (size_t)getpagesize(); char *v = malloc(4096);
+    for (unsigned round = 0;; round++) {
+        sleep(round ? 15 : 30);
+        size_t given = 0;
+        for (uintptr_t o = (uintptr_t)g_as, end = (uintptr_t)g_as + g_reserve; o < end; ) {
+            vm_address_t r = o; vm_size_t rs = 0; vm_region_extended_info_data_t vi; mach_msg_type_number_t cnt = VM_REGION_EXTENDED_INFO_COUNT; mach_port_t obj = MACH_PORT_NULL;
+            if (vm_region_64(mach_task_self(), &r, &rs, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || r >= end) break;
+            o = r + rs;
+            if ((vi.protection & (VM_PROT_READ | VM_PROT_WRITE)) != (VM_PROT_READ | VM_PROT_WRITE) || vi.share_mode != SM_PRIVATE || !vi.pages_resident) continue;
+            for (uintptr_t c = r; c < r + rs; c += 4096 * pg) {   // 4096 pages at a time: a run never spans a chunk
+                size_t n = ((size_t)(r + rs - c) < 4096 * pg ? (size_t)(r + rs - c) : 4096 * pg) / pg;
+                if (mincore((void *)c, n * pg, v)) continue;
+                for (size_t i = 0; i < n; ) {
+                    if (!(v[i] & MINCORE_INCORE) || !zs_zero(c + i * pg, pg)) { i++; continue; }
+                    size_t j = i + 1; while (j < n && j - i < (64u << 20) / pg && (v[j] & MINCORE_INCORE) && zs_zero(c + j * pg, pg)) j++;   // a run at a time holds the graphics layer's lock (mtl_pool_unwrapped_do)
+                    uintptr_t lo = c + i * pg, hi = c + j * pg;
+                    given += mtl_pool_unwrapped_do(lo, hi, zs_run);
+                    i = j;
+                }
+            }
+        }
+        atomic_fetch_add(&g_zs_given, given);
+        if (given || round < 4) LOG("zero pages: %zu MB of all-zero guest pages given back this round (%llu MB in all)", given >> 20, (unsigned long long)(atomic_load(&g_zs_given) >> 20));
+    }
+    return NULL;
+}
 static int guest_release(uintptr_t lo, uintptr_t hi) {
+    if (g_memfd >= 0) {   // mem_file: a hole in the file. Pages a no-copy buffer holds stay as they are, bytes and all (measured): then the range is not fresh
+        if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
+        fpunchhole_t ph = {0, 0, (off_t)(lo - (uintptr_t)g_as), (off_t)(hi - lo)};
+        if (fcntl(g_memfd, F_PUNCHHOLE, &ph)) { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx: no hole punched (errno %d): it keeps its bytes", (unsigned long)lo, (unsigned long)(hi - lo), errno); return 0; }
+        size_t pg = (size_t)getpagesize(), n = (hi - lo) / pg; char v[256];
+        for (size_t i = 0; i < n; i += sizeof v) { size_t k = n - i < sizeof v ? n - i : sizeof v;
+            if (mincore((void *)(lo + i * pg), k * pg, v)) return 0;
+            for (size_t j = 0; j < k; j++) if (v[j] & MINCORE_INCORE) return 0; }
+        return 1;
+    }
     if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
     static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);

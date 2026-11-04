@@ -51,6 +51,8 @@ t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hl
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
+t_dirty_since: t_dirty_since.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_since.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
@@ -117,6 +119,9 @@ check_t_perf_order: t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+t_sampled_storage: t_sampled_storage.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sampled_storage.m $(MTL_T_SRC) $(FW)
+check_t_sampled_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_tex.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_cpu_tex

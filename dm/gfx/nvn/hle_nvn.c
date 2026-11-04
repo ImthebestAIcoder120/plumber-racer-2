@@ -24,6 +24,9 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -1034,7 +1037,14 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
+// NVN2's task (6) and mesh (7) stages take the slots of tessellation control (3) and evaluation (4), which no game here uses: the replay keeps six stages a binding table
+// and NvProg.sh (nvn_mtl.m stage_of), and a draw is either a mesh draw (task, mesh, fragment) or a vertex one, never both. Bindings and program stage bits move here
+static int st_slot(int st) {
+    if (st == 6 || st == 7) { static int once; if (!once++) LOG("[nvn] first task / mesh stage binding (stage %d): kept in the tessellation slots", st); return st - 3; }
+    return st;
+}
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
+    if (stages & 0xc0) stages = (stages & 0x3f & ~0x18) | (stages & 0x40 ? 0x08 : 0) | (stages & 0x80 ? 0x10 : 0);   // task / mesh bits (0x40 / 0x80) to the slots' bits
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = rec(c, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n); r->kind = kind; memcpy(r->bytes, st, n); }   // only the state's own bytes (nvn_obj.h p_bind_state)
@@ -1060,6 +1070,7 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
 NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
+    st = st_slot(st);
     if ((unsigned)st < 6 && (unsigned)i < 16 && n <= UINT32_MAX) {
         *REC(c, OP_BIND_UBO_SMALL, p_bind_ubo_small) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)i, (uint32_t)n, a}; return;
     }
@@ -1072,13 +1083,16 @@ static void ssbo_slot_check(int st, int i) {   // the replay keeps 16 storage bu
     if (i >= 16) { static int n; if (n++ < 8) LOG("[RED] storage buffer bound at slot %d of stage %d: the host keeps 16 a stage, the bind is dropped", i, st); }
 }
 NVN(nvnCommandBufferBindStorageBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
+    st = st_slot(st);
     ssbo_slot_check(st, i);
     *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
 NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) {
+    st = st_slot(st);
     for (int i = 0; i < n; i++) { ssbo_slot_check(st, first + i); *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size}; }
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
+    st = st_slot(st);
     if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }
     p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
     // The driver writes each handle into the c2 table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half of the 64-bit handle.
@@ -1118,6 +1132,9 @@ NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, 
 NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { rec_draw(c, (p_draw){pr, first, n, 1, 0, 0}); }
 // Indirect: the {count, instances, first, base instance} record at ind is usually written by the GPU earlier in the frame (Hyrule Warriors: Age of Calamity's first battle), so the replay
 // issues a Metal indirect draw from the pool buffer instead of reading it at record or replay time (nvn_mtl.m draw)
+// NVN2 mesh draw: count task (or, with no task stage, mesh) workgroups from first, recorded as a draw of the replay's own primitive (nvn_obj.h NVN_PRIM_MESH), so the pass
+// planning sees a draw that needs the pass's depth and colour like any other. Mario Kart World's race pass draws with it
+NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int n) { if (n > 0) rec_draw(c, (p_draw){NVN_PRIM_MESH, first, n, 1, 0, 0}); }
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
@@ -1575,8 +1592,13 @@ static void tsummary(uint64_t frame) {
     { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
+#if TARGET_OS_IPHONE
+      double av = os_proc_available_memory() / 1048576.0;   // how far the footprint is from the system's limit for this process
+#else
+      double av = -1;
+#endif
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
-      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
+      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB (limit in %.0f MiB); brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, av, br, dm_thermal_now()); }
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2576,6 +2598,7 @@ NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcom
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) {
+    st = st_slot(st);
     int32_t tb = CB(c)->tex_base, sb = CB(c)->samp_base;
     if (tb || sb) { *REC(c, OP_BIND_TEX1, p_bind_tex1) = (p_bind_tex1){st, i, (uint64_t)h, tb, sb}; return; }
     p_bind_tex1 *r = rec(c, OP_BIND_TEX1, offsetof(p_bind_tex1, tbase)); r->stage = st | BIND_TEX1_NOBASE; r->slot = i; r->h = (uint64_t)h;   // no bases: the record ends after h
@@ -2669,9 +2692,28 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
     if (!r && rs) r = fn(rs, (uint64_t)(re - rs), arg);
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
-static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since(p, n, stamp); }
+// A sparse texture's mapped runs mostly lie in one physical pool: the walk keeps the dirty-tracking range it found, so each run is not looked up among every pool's range (Mario Kart
+// World's 8192x8192x68 arrays: a check walked thousands of runs, each a scan of ~4,800 ranges, on every draw binding one). From the kartnative fork, cf0344bb, b0046eb3
+// one: set when every run lies in one range (a mapped texture whose runs span several pools, or none, gets NULL), so a later check with no mapping change since can ask only that
+// range whether anything in it was written (nvn_dirty_range_since) instead of walking the page table again
+struct run_ctx { uint64_t stamp; const void *span; int multi; };
+static int run_written(const uint8_t *p, uint64_t n, uint64_t arg) { struct run_ctx *c = (struct run_ctx *)(uintptr_t)arg; const void *was = c->span; int r = nvn_dirty_since_keep(&c->span, p, n, c->stamp); c->multi |= was && c->span != was; return r; }
 static int run_protect(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect(p, n); return 0; }
-int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { return vpt_walk(pool, a, n, gen, run_written, stamp); }
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp, const void **one) {
+    struct run_ctx c = {stamp, NULL, 0}; int r = vpt_walk(pool, a, n, gen, run_written, (uint64_t)(uintptr_t)&c);
+    if (one) *one = !r && !c.multi ? c.span : NULL;
+    return r;
+}
+// The physical memory behind [a, a+n) of a sparse pool when it is one contiguous run of mapped pages, else NULL: a GPU-written texture's content belongs to the physical pages,
+// which the game may map at another place or in another texture (nvn_mtl.m sp_phys_tile)
+const void *nvn_sparse_phys(const void *pool, uint64_t a, uint64_t n) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); const uint8_t *first = NULL; int ok = v != NULL;
+    for (uint64_t p = 0, o = v ? a - (uint64_t)(uintptr_t)v->base : 0; ok && p < n; p += 0x1000) {
+        const vpte *e = o + p < v->size ? vpt_get(v, o + p) : NULL;
+        if (!e || !e->phys) ok = 0; else if (!p) first = e->phys; else if (e->phys != first + p) ok = 0;
+    }
+    pthread_mutex_unlock(&g_vp_mu); return ok ? first : NULL;
+}
 int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every page of [a, a+n) has memory behind it
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }

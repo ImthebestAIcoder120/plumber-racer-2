@@ -40,7 +40,9 @@ def bundle_files(d):
     _, p = _cstr(d, 12); _, p = _cstr(d, p)
     size, csz, usz, flags = struct.unpack_from('>qIII', d, p); p += 20
     if fmt >= 7: p = (p + 15) & ~15
-    if flags & 0x80: info_raw = d[len(d) - csz:]
+    # Blocks info at the end: at the end of the bundle as its header's size gives it, which may be before the end of the file. Luminescent Platinum 2.2F's pm0487_12_00 has 665 stale bytes
+    # after its 194,937 (a second, older blocks info among them, whose blocks do not decompress); the game reads it on the Switch
+    if flags & 0x80: end = size if 0 < size <= len(d) else len(d); info_raw = d[end - csz:end]
     else: info_raw = d[p:p + csz]; p += csz
     info = _decomp(info_raw, usz, flags & 0x3f)
     q = 16; nb = struct.unpack_from('>i', info, q)[0]; q += 4

@@ -46,6 +46,15 @@ To enroll a cut for any game's own module:
   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
 
+## Function boundaries
+
+### A module without eh_frame_hdr
+
+- **Symptom:** `patch_nso.py` stops with `KeyError: 15` in `rd` while reading function boundaries.
+- **Cause:** MOD0's eh_frame_hdr start and end are equal: the module has no unwind table (a mod's module built without one), and the reader took the bytes there as a header with omitted (0xff) encodings.
+- **Fix:** with no eh_frame_hdr the function starts are the module's defined `STT_FUNC` symbols and the targets of its own BLs (646 on Luminescent Platinum's `subsdk1`).
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md#luminescent-platinum) with Luminescent Platinum 2.2F.
+
 ## Jump tables
 
 ### Offset jump tables through x18 read at rewrite time

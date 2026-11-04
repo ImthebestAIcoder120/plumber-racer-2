@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
-       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML };
+       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML, NVN_RB_SPILL };
 // GMEM: the host's memory pool table for global memory the translator traced to no storage buffer (dmsh_abi.h DMSH_GMEM_MAP_*, nvn_mtl.m gmem_map_gpu): the shader may read, and with rw
 // write, anything in any pool. GMEML: the write log of those stores (dmsh_abi.h DMSH_GMEM_LOG_*, nvn_mtl.m gml_take)
 // TEXP / SAMPP: the texture / sampler pool as one array indexed by the handle's ID, for a handle the translator traced to no slot (dmsh_build.py pool_arrays): one argument buffer entry,
@@ -33,7 +33,7 @@ typedef struct {
     uint8_t kind, rw;        // rw: storage buffer access is read_write / write / device
     uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: MTLTextureType value, pixel class
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
-    uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer; SBUFU: of the 64-bit storage buffer address
+    uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer; SBUFU: of the 64-bit storage buffer address; SPILL: bytes per threadgroup / 256
     uint16_t n;              // TEXD / SAMPD, TEXA / SAMPA, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
     uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none
     uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
@@ -47,6 +47,7 @@ typedef struct {
                                                                 // sh[ct]: Metal attribute index of the input's shadow of that component type in the <key>_bv library (0xff = none; dmsh_vin.py)
     uint8_t has_vin;         // has a shadow-input library <key>_bv (nvn_mtl.m vin_fn)
     uint16_t tg[3];          // Compute thread group size (none = 0)
+    uint16_t payload;        // A task shader's payload bytes, what its mesh pipeline reserves (dmsh_build.py; 0 = not given)
     struct { uint8_t reg; uint16_t word; uint32_t value; } first[4]; uint8_t nfirst;   // Stores to storage buffer words the host makes before each dispatch (dmsh_build.py first_store)
     uint8_t route_b, has_c1; // Route B; has a c1 constant segment
     uint8_t bindless;        // Has TEXU / SAMPU bindings (which texture is read is known only at replay time)

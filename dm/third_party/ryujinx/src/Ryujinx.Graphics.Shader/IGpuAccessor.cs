@@ -39,6 +39,16 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// NVN2 (Switch 2) task and mesh shaders: the byte offsets in shared memory where the translator keeps their stage buffer (ISBE) regions, written and read by
+        /// ISBEWR / ISBERD: the output attributes (per-vertex, the shader's own shared memory, a task's payload), the map (a mesh's primitive count and indices) and the
+        /// input attributes (the workgroup index, a mesh's task payload); null for other shaders, where ISBEWR does nothing and ISBERD passes its address through.
+        /// </summary>
+        int[] QueryAmpereIsbe()
+        {
+            return null;
+        }
+
+        /// <summary>
         /// Gets a span of the specified memory location, containing shader code.
         /// </summary>
         /// <param name="address">GPU virtual address of the data</param>

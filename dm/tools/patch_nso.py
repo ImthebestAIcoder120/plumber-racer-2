@@ -537,15 +537,34 @@ def rd(o, enc):
     if app == 0x10: v += o
     if app == 0x30: v += ehs
     return v, sz
-_, penc, cenc, tenc = IMG[ehs:ehs + 4]
-o = ehs + 4
-_, s = rd(o, penc); o += s
-nfde, s = rd(o, cenc); o += s
 starts = set()
-for _ in range(nfde):
-    a, s = rd(o, tenc); o += s
-    _, s = rd(o, tenc); o += s
-    starts.add(a)
+if struct.unpack_from('<i', IMG, m0 + 16)[0] != struct.unpack_from('<i', IMG, m0 + 20)[0]:
+    _, penc, cenc, tenc = IMG[ehs:ehs + 4]
+    o = ehs + 4
+    _, s = rd(o, penc); o += s
+    nfde, s = rd(o, cenc); o += s
+    for _ in range(nfde):
+        a, s = rd(o, tenc); o += s
+        _, s = rd(o, tenc); o += s
+        starts.add(a)
+else:
+    # No eh_frame_hdr (MOD0's start and end equal): a mod's module linked without unwind tables (Luminescent Platinum's subsdk1). Its defined function symbols and the targets of its own BLs
+    # are the function starts instead
+    dyn = m0 + struct.unpack_from('<i', IMG, m0 + 4)[0]; D = {}
+    while True:
+        t, v = struct.unpack_from('<qQ', IMG, dyn); dyn += 16
+        if t == 0: break
+        D.setdefault(t, v)
+    if 6 in D and 5 in D:
+        for k in range(1, (D[5] - D[6]) // 24 if D[5] > D[6] else 0):
+            _, info, _, sh, val, _ = struct.unpack_from('<IBBHQQ', IMG, D[6] + k * 24)
+            if sh and info & 0xF == 2: starts.add(val)   # STT_FUNC
+    for o in range(0, TEXT_END, 4):
+        w = struct.unpack_from('<I', IMG, o)[0]
+        if w & 0xFC000000 == 0x94000000:
+            t = o + ((w & 0x3FFFFFF) - ((w & 0x2000000) << 1)) * 4
+            if 0 <= t < TEXT_END: starts.add(t)
+    print(f'{NAME}: no eh_frame_hdr; {len(starts)} function starts from symbols and calls')
 starts = sorted(x for x in starts if x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----

@@ -91,6 +91,9 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_SPILL]) {   // shared memory past Metal's limit, in a device buffer (dmsh_build.py spill_shared): a slice of bytes per threadgroup
+                int bytes = [b[@"bytes"] intValue]; if (bytes <= 0 || bytes % 256 || bytes / 256 > 0xFFFF) FAIL("B binding %s: %d spill bytes per threadgroup", nm.UTF8String, bytes);
+                r->kind = NVN_RB_SPILL; r->rw = 1; r->off = (uint16_t)(bytes / 256); }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == DMSH_PUSH_BANK ? NVN_RB_PUSH : [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }
@@ -170,6 +173,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         }
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
+        if ([j[@"payload"] isKindOfClass:[NSNumber class]]) o->payload = (uint16_t)MIN([j[@"payload"] intValue], 16384);
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }

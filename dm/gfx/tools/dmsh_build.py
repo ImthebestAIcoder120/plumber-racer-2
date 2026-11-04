@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_abi as abi   # abi: the drive
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, dmsh_meshstage, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -157,6 +157,42 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# Shared memory past Metal's limit: Ampere gives a compute shader up to 100 KB of it, Apple GPUs 32 KB, and Mario Kart World's declare 48 KB (threadgroup spvUnsafeArray<uint, 12288>),
+# which Metal refuses to make a pipeline of. Such a kernel's shared arrays become pointers into a device buffer the host gives each dispatch (abi.KIND_SPILL), one slice per threadgroup,
+# and its barriers also order device memory. Device memory is slower than threadgroup memory, but these few shaders otherwise do not run at all
+SPILL_DECL = re.compile(r'^([ \t]*)threadgroup spvUnsafeArray<(\w+), (\d+)> (\w+);\n', re.M)
+SPILL_SIZE = {'uint': 4, 'int': 4, 'float': 4, 'half': 2, 'ushort': 2, 'short': 2}
+def spill_shared(msl):
+    """The kernel with its shared arrays in abi.SPILL_MEMBER (see SPILL_DECL) when they total more than abi.SPILL_LIMIT bytes; else unchanged.
+    ValueError for a kernel above the limit this rewrite cannot place (a shared array of another form, or no argument buffer)"""
+    kern = re.search(r'^kernel void (\w+)\((.*)\)\n\{\n', msl, re.M)
+    if not kern: return msl
+    decls = [m for m in SPILL_DECL.finditer(msl) if m.start() >= kern.end()]
+    total = sum(SPILL_SIZE.get(m.group(2), 4) * int(m.group(3)) for m in decls)
+    other = re.search(r'^[ \t]*threadgroup (?!spvUnsafeArray<\w+, \d+> \w+;)[^(]*;', msl[kern.end():], re.M)
+    if total + (1 if other else 0) <= abi.SPILL_LIMIT: return msl
+    if other or any(m.group(2) not in SPILL_SIZE for m in decls): raise ValueError('shared memory above the Metal limit in a form the spill cannot place')
+    body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', msl, re.S)
+    if not body or 'spvDescriptorSetBuffer0& spvDescriptorSet0' not in kern.group(2): raise ValueError('shared memory above the Metal limit in a kernel without an argument buffer')
+    members = [(m.group(1).strip(), int(m.group(3))) for m in re.finditer(r'^\s*(.+?)\s+(\w+)\s*\[\[id\((\d+)\)(?:\s*,\s*\w+\(\d+\))*\]\];', body.group(1), re.M)]
+    nid = max(aid + (int(a.group(1)) if (a := re.fullmatch(r'array<.*,\s*(\d+)>', ty)) else 1) for ty, aid in members)
+    slice_ = (total + 255) & ~255
+    # the slices' place: the threadgroup's index in the grid (the kernel's own threadgroup ID when it has one)
+    params = kern.group(2)
+    tg = re.search(r'uint3 (\w+) \[\[threadgroup_position_in_grid\]\]', params)
+    tgn = tg.group(1) if tg else 'dm_spill_id'
+    params += ('' if tg else f', uint3 {tgn} [[threadgroup_position_in_grid]]') + ', uint3 dm_spill_n [[threadgroups_per_grid]]'
+    head = (f'    device uchar* dm_spill_base = (device uchar*)spvDescriptorSet0.{abi.SPILL_MEMBER} + ulong(({tgn}.z * dm_spill_n.y + {tgn}.y) * dm_spill_n.x + {tgn}.x) * {slice_}u;\n')
+    off, out, last = 0, [], kern.end()
+    for m in decls:
+        out.append(msl[last:m.start()])
+        out.append(f'{m.group(1)}device {m.group(2)}* {m.group(4)} = (device {m.group(2)}*)(dm_spill_base + {off});\n')
+        off += (SPILL_SIZE[m.group(2)] * int(m.group(3)) + 15) & ~15; last = m.end()
+    msl = msl[:kern.start()] + f'kernel void {kern.group(1)}({params})\n{{\n' + head + ''.join(out) + msl[last:]
+    msl = msl.replace('threadgroup_barrier(mem_flags::mem_threadgroup)', 'threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)')
+    body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', msl, re.S)
+    end = body.end(1)
+    return msl[:end] + ('' if msl[end - 1] == '\n' else '\n') + f'    device uint* {abi.SPILL_MEMBER} [[id({nid})]];   // {slice_} bytes per threadgroup\n' + msl[end:]
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -183,7 +219,7 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 #   c2 C2_SAMP + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < C2_SEP_SLOTS
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
-SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS}
+SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -522,6 +558,11 @@ def job_for(key, name, rec, w):
         # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
         # AMapC0). Graphics keeps NVN's tables
         if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
+        # task / mesh: translated as compute (the instructions after the SPH, which only the build reads) with their stage buffer in shared memory (dmsh_meshstage.py)
+        if stage in ('ts', 'ms'):
+            mi = dmsh_meshstage.info(rec[ci:], rec[0x38:ci])   # the whole code area: a mesh's second SPH lies past its instructions
+            extra['meshstage'] = mi; extra['isbe'] = dmsh_meshstage.isbe_layout(mi)
+            code = code[0x80:]
     else:
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
         c1 = rec[0x38 + c1o:0x38 + c1t]
@@ -541,6 +582,7 @@ def job_for(key, name, rec, w):
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
+    if 'isbe' in j: j['shared'] = j['isbe'][3]; j['local'] = [j['meshstage']['threads'], 1, 1]   # the stage buffer is the shared memory the translator declares
     return j, c1
 
 TF_SLOT = 8   # Metal vertex buffer index of transform feedback buffer 0 (1-3 follow): slot 0 is the argument buffer, 16-29 the vertex streams, 30 the zero buffer (nvn_mtl.m tf_draw)
@@ -764,6 +806,7 @@ def reflect(key, stage, msl, res):
         if ty == 'sampler' and nm.endswith('Smplr' + abi.BORDER_TWIN):   # a sampler's twin (border_emu): the same sampler, its bit in the block in the order of the twins
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
+        elif nm == abi.SPILL_MEMBER: e.update(kind=abi.KIND_SPILL, bytes=int(re.search(r'\b%s \[\[id\(\d+\)\]\];   // (\d+) bytes per threadgroup' % abi.SPILL_MEMBER, msl).group(1)), rw=True)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
         elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
@@ -1036,7 +1079,14 @@ def fs_uint(src):
     # (the library stays small): an output from integer bits, or nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target)
     from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
     writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
+    # or nothing but flat inputs passed on (directly or through a temporary): a flat input's bits arrive unchanged, so they may be an integer the previous stage wrote. Mario Kart
+    # World's mesh shader b6d76b6fc9dc926f writes a per-primitive integer that pixel shader dcb0504c844f1ecc passes into an R8Uint target, which Metal refused as a float output
+    ins = re.search(r'struct main0_in\s*\{(.*?)\};', src, re.S)
+    flat = set(re.findall(r'^\s*\w+\s+(\w+)\s*\[\[[^\]]*\bflat\b[^\]]*\]\];', ins.group(1), re.M)) if ins else set()
+    temps = {t for t, v in re.findall(r'^\s*(?:float|uint|int)\d?\s+(\w+)\s*=\s*in\.(\w+)(?:\.\w+)?;', src, re.M) if v in flat}
+    passed = lambda w: re.fullmatch(r'in\.(\w+)(?:\.\w+)?', w) and re.fullmatch(r'in\.(\w+)(?:\.\w+)?', w).group(1) in flat or w in temps
+    constant = lambda w: re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w)
+    if not from_int and not (writes and all(constant(w.strip()) or passed(w.strip()) for w in writes)): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
@@ -1218,7 +1268,14 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
-    src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
+    src = border_emu(src)   # border colours Metal lacks (see border_emu)
+    if j['stage'] in ('ts', 'ms'):   # the kernel as a Metal object / mesh function (see dmsh_meshstage.py)
+        try: src = dmsh_meshstage.rewrite(src, j['meshstage'], j['isbe'])
+        except ValueError as e: return 'task / mesh rewrite failed', str(e)[:160], None
+    if j['stage'] == 'cs':   # shared memory past Metal's limit (see spill_shared)
+        try: src = spill_shared(src)
+        except ValueError as e: return 'shared memory spill failed', str(e)[:160], None
+    open(msl, 'w').write(src)
     first = []
     if j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)
@@ -1263,6 +1320,7 @@ def finish(key, w, j, c1):
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
+            **({'payload': max(j['meshstage']['payload'], 16)} if j['stage'] == 'ts' else {}),   # a task's payload bytes, header included: the mesh pipeline's payload memory (nvn_mtl.m mesh_pso)
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],

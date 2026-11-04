@@ -47,6 +47,8 @@ WORK_DIR = ''                           # the game's build folder (empty = <titl
 OUT_IPA = ''                            # output IPA (empty = <the profile's ipa> in the NSP folder); with PLATFORM 'mac-app' the output app (empty = <game name>.app in the NSP folder)
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
 BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per-game Xcode ID, else org.nxnative.<base game title ID in lowercase>)
+ICON = ''                               # the app's icon: an image file, square (scaled to 1024x1024; empty = the game's own icon from its control data)
+MOD_DIR = ''                            # an Atmosphère-layout mod (a folder with exefs/ and romfs/, as atmosphere/contents/<title ID>/) laid over the packed version (empty = none)
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
 PREPARE_XCODE = False                   # prepare a per-game Xcode project and add it to the workspace instead of packing an IPA; requires KEEP_EXTRACTED
@@ -902,7 +904,25 @@ def frame_step_builds(path):   # the build IDs of the FRAME_STEP table of a patc
     return set()
 
 
-def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
+def mod_extract(src, mod, out, logs):
+    """src with an Atmosphère-layout mod laid over it (dm/tools/mod_apply.py) in out: returns the profile keys the mod needs ({'modules': ..., 'module_at': ...}). Reused when the extraction,
+    the mod's files and the tool are as at the last successful run"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'dm/tools')); import mod_apply
+    PROG.stage('mod', step=f'laying {mod} over the game')
+    tools = [Path(mod_apply.__file__), Path(rfs.__file__).with_name('romfs_image.py')]
+    key = fingerprint(('files', tools + sorted(p for sub in ('exefs', 'exefs_patches', 'romfs') for p in (mod / sub).rglob('*') if p.is_file() and p.name != '.DS_Store')), ('stat', src))
+    kf, done = out.with_name(out.name + '.key'), None
+    if (note := reused(kf, key)) and (out / 'RomFS.img').is_file(): done = json.loads(note)
+    if done is None:
+        tmp = out.with_name(out.name + '.partial'); rmtree(tmp); rmtree(kf)
+        with open(logs / 'mod.log', 'w') as lf, contextlib.redirect_stderr(lf): mods, at = mod_apply.apply(src, mod, tmp)
+        done = {'modules': ' '.join(mods)} | ({'module_at': ' '.join(f'{k}={v:#x}' for k, v in at.items())} if at else {})
+        swap_in(tmp, out); kf.write_text(f'{key}\n{json.dumps(done)}\n')
+    PROG.end(', '.join(f'{k} {v}' for k, v in done.items()))
+    return done
+
+
+def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, keys=None):
     """The game's profile for a version it was not brought up on (the folder has no update, another update, files of other builds, or a registered build under another title ID: app),
     in pdir (outside the repository, where a provisional profile goes): its keys as they are, with this version's build row, package and shader versions, and app's title ID and
     main.npdm's program ID when app is not the profile's title. The shader tables, the chain header and the run-time capture list are
@@ -910,7 +930,8 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     they name shaders by content key. A folder derived from the same inputs (the files copied and the game.tsv written, kept in <pdir>.derived.key) is kept as it is, with what later
     stages wrote into it (mem_used, the heap check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
     only the shader tables change with installed DLC or newly decoded compute kernels. A profile with frame step stubs (FRAME_STEP) for other builds only gets fps_target 0 for this version:
-    its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
+    its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). keys replaces or adds rows (a mod's modules and
+    module_at, mod_extract). Returns the version's display version"""
     src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
     T, disp = '\t', nacp.version(d / 'control.nacp') or '?'
     row = T.join(['build', ver, disp] + [f'{m}={build_id(d / "ExeFS" / m)}' for m in mods if (d / 'ExeFS' / m).exists()])
@@ -923,7 +944,9 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
         out.insert(1, f'# under title ID {app:016X}, not the profile\'s {g.title_id:016X}')
     stubs = frame_step_builds(g.dir / 'patches.py')
     own_step = shader_only or not stubs or not (d / 'ExeFS/main').exists() or build_id(d / 'ExeFS/main') in stubs
+    keys = dict(keys or {})
     for line in (g.dir / 'game.tsv').read_text(encoding='utf-8').splitlines():
+        if line.split(T, 1)[0] in keys: out.append(f'{line.split(T, 1)[0]}{T}{keys.pop(line.split(T, 1)[0])}'); continue
         if not own_step and line.split(T, 1)[0] == 'fps_target' and line.partition(T)[2].strip() != '0':
             out += ['# the profile has frame step stubs for other builds only: this version\'s main has none, so it keeps the game\'s own step', f'fps_target{T}0']; continue
         if line.split(T, 1)[0] in ids: out.append(ids[line.split(T, 1)[0]]); continue
@@ -931,6 +954,7 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
             if not put: out += [row, f'package{T}{ver}', f'shader_versions{T}{ver}']; put = True
             continue
         out.append(line)
+    out += [f'{k}{T}{v}' for k, v in keys.items()]
     text, kf = '\n'.join(out) + '\n', derived_key(pdir)   # beside the profile, not in it: no tool reads it as a table
     key = fingerprint(('files', src), text)
     if (pdir / 'game.tsv').is_file() and reused(kf, key) is not None:
@@ -1853,7 +1877,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
-    if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
+    first = not provisional and not g.table('shader_map.tsv').is_file()   # a hand-made profile's first split (a dump-folder game, which the survey cannot make a profile for): no tables to check yet
+    if bad and not provisional and not first:   # the profile's tables were split from every file: one that does not read now is a reader change
         raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
     if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
@@ -1866,8 +1891,12 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         promote(derive_compute, 'compute')
     if provisional or g.table('pso_pairs.tsv').is_file(): names += ('pso_pairs.tsv',)
     else: shutil.copyfile(tmp / 'tables' / 'pso_pairs.tsv', pkg.with_name('pso_pairs.tsv'))
-    if provisional:   # a provisional profile takes the tables as they come
+    if provisional or first:   # a provisional profile, or a new one, takes the tables as they come
+        if first: say(f'game profile {g.id} has no shader tables yet: it takes these ({", ".join(names)}); later splits are checked against them')
         for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
+        if first:   # and the other tables a provisional profile starts with (the conflict rulings, bf_want, the prewarm seed list), which the shader build and build_ipa.sh read
+            for n, text in EMPTY_TABLES.items():
+                if not g.table(n).exists(): g.table(n).write_text(text)
     else:
         # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
         diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
@@ -2252,11 +2281,11 @@ def mac_host(py, repo, work, env, logs, g):
     return host, font
 
 
-def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file=''):
+def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file='', run_dir='run'):
     """The command that runs the game in a window with sound after a Mac-only build (PLATFORM 'mac'; docs/development.md, Build by hand (Mac), step 5): its save and temporary storage in
     <id>_build/run (kept from run to run), the extracted RomFS, the Mac shader libraries (msl), the DLC, the profile's shader map (a host outside dm/host does not find it beside itself;
     c1_full.tsv and cb_extent.tsv are read beside it), the game language, and the switches of an environment file (DM_ENV_FILE / --env-file)"""
-    rd = work / 'run'
+    rd = work / run_dir   # run-mod for a mod (--mod), whose save is not the plain game's
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl, 'DM_FONT_DIR': font}
     if aoc: renv['DM_AOC_DIR'] = aoc
@@ -2369,6 +2398,9 @@ def parse_args(argv):
     ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits (default: the TITLE_ID setting)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
+    ap.add_argument('--icon', help='the app\'s home-screen icon: a square image file (PNG, JPG), scaled to 1024x1024 (default: the ICON setting, else the game\'s own icon)')
+    ap.add_argument('--mod', help='an Atmosphère-layout mod laid over the packed version: a folder with exefs/ (code modules, IPS patches named by build ID) and romfs/ (files over the game\'s). '
+                    'Packed from a profile derived for it, with its own app name, bundle ID and output name (default: the MOD_DIR setting, else none)')
     ap.add_argument('--app-name', help='app name on the home screen (default: the game name in the base NSP)')
     ap.add_argument('--bundle-id', help='the app\'s bundle ID (default: saved Xcode ID when preparing again, else org.nxnative.<base game title ID in lowercase>)')
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
@@ -2556,6 +2588,9 @@ def main(args=None):
     work = work_dir(args) or nsp_dir / f'{g.id}_build'
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
+    mod_dir = Path(os.path.expanduser(args.mod or MOD_DIR)).resolve() if (args.mod or MOD_DIR) else None
+    if mod_dir and not mod_dir.is_dir(): raise BuildError(f'--mod: no folder {mod_dir}')
+    if mod_dir and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(f'{out_ipa.stem}-{re.sub(r"[^A-Za-z0-9]+", "", mod_dir.name) or "mod"}{out_ipa.suffix}')   # never over the plain game's IPA
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
     project = work / 'xcode/DmIOS.xcodeproj'
     workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
@@ -2600,10 +2635,18 @@ def main(args=None):
         derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'
         say(f'{derived}: packing {pkg_ver} from a profile derived from it')
         versions, dirs = [pkg_ver], {pkg_ver: dirs[pkg_ver]}
+    mod_keys = {}
+    if mod_dir:   # the mod's files laid over the packed version, packed from a profile derived for it with the mod's modules (mod_extract)
+        PROG.add(1)
+        mod_keys = mod_extract(dirs[pkg_ver], mod_dir, ex / f'{pkg_ver}-mod', logs)
+        versions, dirs = [pkg_ver], {pkg_ver: ex / f'{pkg_ver}-mod'}
+        derived = derived or f'mod {mod_dir}'
+        say(f'mod {mod_dir}: {", ".join(f"{k} {v}" for k, v in mod_keys.items())}')
     reg = g   # the profile as registered (a derived build reports what it lacks against it)
     if derived:   # the derived profile goes where a provisional one would, and every tool (game.py, make, build_ipa.sh) takes it first (DM_GAMES_FIRST)
         pdir = profile_folder(args, nsp_dir, app)
-        disp = derive_profile(g, pdir / g.id, pkg_ver, dirs[pkg_ver], g.words('modules'), app)
+        if mod_dir: pdir = pdir.with_name(pdir.name + '-mod')   # never over the plain game's derived profile
+        disp = derive_profile(g, pdir / g.id, pkg_ver, dirs[pkg_ver], mod_keys.get('modules', ' '.join(g.words('modules'))).split(), app, keys=mod_keys)
         os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
@@ -2628,8 +2671,9 @@ def main(args=None):
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
     app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data
+    if mod_dir and not (args.app_name or APP_NAME) and app_name: app_name = f'{app_name} ({mod_dir.name})'   # a mod is its own app: its own name, bundle ID (and so its own save) beside the plain game's
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
-    bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
+    bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}' + (f'.mod.{re.sub(r"[^A-Za-z0-9]+", "", mod_dir.name).lower() or "mod"}' if mod_dir else '')
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
@@ -2644,7 +2688,7 @@ def main(args=None):
     say(f'game language: {lang} ({dict(nacp.LANGUAGES)[lang]})' + (f', the game has no {want_lang}' if lang != want_lang else '')
         + (f'; the game\'s languages: {" ".join(have)}' if have else '; the control data lists no languages (not checked)') + (' (DM_LANG=<code> in the run command changes it)' if mac else ' (DM_LANG=<code> in the app\'s Documents/env.txt changes it)'))
 
-    patched = work / f'patched_{pkg_ver}'
+    patched = work / f'patched_{pkg_ver}{"-mod" if mod_dir else ""}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)
@@ -2683,7 +2727,10 @@ def main(args=None):
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
-    icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
+    icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
+    if args.icon or ICON:   # an icon of the player's own instead of the game's
+        icon = Path(os.path.expanduser(args.icon or ICON)).resolve()
+        if not icon.is_file(): raise BuildError(f'--icon: no file {icon}')   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
@@ -2699,9 +2746,9 @@ def main(args=None):
         return
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         host, font = mac_host(py, repo, work, env, logs, g)
-        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file)
+        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, 'run-mod' if mod_dir else 'run')
         rmtree(work / 'tmp')
-        say(f'done: the game runs on the Mac with this command (its save in {work / "run/save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')
+        say(f'done: the game runs on the Mac with this command (its save in {work / ("run-mod" if mod_dir else "run") / "save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')
         PROG.say(cmd)
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac build', patched)
         return

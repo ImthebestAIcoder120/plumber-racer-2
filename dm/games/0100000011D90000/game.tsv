@@ -37,6 +37,12 @@ sys_resource	0x1000000
 fps_target	60
 present_interval	display
 
+# ---- Touch controls ----
+# A phone game's layout with ball-style keys in white and gray, opening on the 3D layout (D-pad for grid movement)
+pad_layout	full
+pad_style	mobile
+pad_theme	mono
+
 # ---- Shader split ----
 shader_groups	/Data/=data
 shader_note	Pokémon Brilliant Diamond shaders

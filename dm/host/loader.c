@@ -568,6 +568,38 @@ void loader_hash_log(void) {
     }
 }
 
+// ---- Modules at fixed offsets from main (the profile's module_at) ----
+// A mod's module may be linked against main at fixed distances, as Horizon's loader lays the modules out one after another: Luminescent Platinum's subsdk1 makes 1,228 direct B/BL into main,
+// and its IPS on main branches back into it (dm/tools/mod_apply.py). Such a module is mapped at main's base + its offset: main's reservation is extended to cover it, and the gap between
+// main's rewritten image and the module stays inaccessible. Main is the first module, so it is mapped first.
+static const struct { const char *name; uint64_t off; } g_module_at[] = DM_GAME_MODULE_AT;
+static int g_nprofile;   // modules of the profile (load_modules), whose layouts are read before any is mapped
+static int64_t module_at(const module_t *m) {
+    for (int i = 0; i < DM_GAME_NMODULE_AT; i++) if (g_module_at[i].name && !strcmp(g_module_at[i].name, m->name)) return (int64_t)g_module_at[i].off;
+    return -1;
+}
+static uint64_t planned_size(const module_t *m, const char *dir);
+// The bytes from main's base its reservation spans: its own, or to the end of the farthest module placed after it
+static uint64_t reserve_span(const module_t *m, uint64_t own, const char *dir) {
+    if (strcmp(m->name, "main")) return own;
+    uint64_t span = own;
+    for (int i = 0; i < g_nprofile; i++) {
+        const module_t *k = &g_mod[i]; int64_t at = module_at(k);
+        if (at < 0) continue;
+        if ((uint64_t)at < own) die("%s at main+%#llx overlaps main's rewritten image (%#llx bytes)", k->name, (unsigned long long)at, (unsigned long long)own);
+        if (k->patch_off < 0) die("%s: module_at with the patch area before the base is not supported", k->name);
+        uint64_t e = (uint64_t)at + planned_size(k, dir);
+        if (e > span) span = e;
+    }
+    return span;
+}
+static uint8_t *fixed_base(const module_t *m) {
+    int64_t at = module_at(m);
+    if (at < 0) return NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].base + at;
+    die("%s: module_at needs main mapped before it (main first in modules)", m->name);
+}
+
 #if TARGET_OS_IPHONE
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
@@ -622,8 +654,14 @@ static void map_image(module_t *m, const char *dir) {
     uint64_t pre = front ? (uint64_t)-m->patch_off : 0;
     if (front) m->patch_len = z1;
     vm_address_t base = 0;
-    if (vm_allocate(mach_task_self(), &base, pre + m->size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("%s failed to reserve %#llx bytes of address space", m->name, (unsigned long long)(pre + m->size));
-    base += pre;
+    uint8_t *fb = fixed_base(m);
+    if (fb) base = (vm_address_t)fb;   // inside main's reservation (reserve_span); the remaps below overwrite its inaccessible pages
+    else {
+        uint64_t span = reserve_span(m, m->size, dir);
+        if (vm_allocate(mach_task_self(), &base, pre + span, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("%s failed to reserve %#llx bytes of address space", m->name, (unsigned long long)(pre + span));
+        base += pre;
+        if (span > m->size && vm_protect(mach_task_self(), base + m->size, span - m->size, FALSE, VM_PROT_NONE) != KERN_SUCCESS) die("%s: cannot protect the reservation for module_at", m->name);
+    }
     remap_at(m, base, x0, z0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
     // A module with nothing to rewrite has an empty patch area (87 of Super Smash Bros. Ultimate's 98 NROs: no x18, SVC or TLS register use); vm_remap refuses 0 bytes
@@ -631,6 +669,13 @@ static void map_image(module_t *m, const char *dir) {
     if (z1) remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     if (z2) remap_at(m, base + m->back_off, x2, z2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
+}
+static uint64_t planned_size(const module_t *m, const char *dir) {   // m->size as map_image sets it, before it is mapped (a module with its patch area after the image)
+    (void)dir;
+    char sx1[17]; snprintf(sx1, sizeof sx1, "__dm%sx1", m->name);
+    unsigned long z1 = 0;
+    if (!getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1)) die("embedded section %s missing", sx1);
+    return (uint64_t)m->patch_off + z1;
 }
 #else
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -654,9 +699,12 @@ static void map_image(module_t *m, const char *dir) {
         if (sz < fl + bl) die("%s is shorter than FILE_IMAGE_LEN %#llx + BACK_LEN %#llx", path, (unsigned long long)fl, (unsigned long long)bl);
         m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
-        uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
+        if (module_at(m) >= 0) die("%s: module_at with the patch area before the base is not supported", m->name);
+        uint64_t span = reserve_span(m, m->size, dir);
+        uint8_t *a = mmap(NULL, pre + span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + span));
         m->base = a + pre;
+        if (span > m->size && mprotect(m->base + m->size, span - m->size, PROT_NONE)) die("%s: cannot protect the reservation for module_at", m->name);
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
         free(raw); install_key_page(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
@@ -667,13 +715,24 @@ static void map_image(module_t *m, const char *dir) {
         return;
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
-    m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m->base == MAP_FAILED) die("%s mmap", m->name);
+    uint8_t *fb = fixed_base(m);
+    if (fb) m->base = mmap(fb, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);   // inside main's reservation (reserve_span)
+    else {
+        uint64_t span = reserve_span(m, m->size, dir);
+        m->base = mmap(NULL, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (m->base != MAP_FAILED && span > m->size && mprotect(m->base + m->size, span - m->size, PROT_NONE)) die("%s: cannot protect the reservation for module_at", m->name);
+    }
+    if (m->base == MAP_FAILED || (fb && m->base != fb)) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+}
+static uint64_t planned_size(const module_t *m, const char *dir) {   // m->size as map_image sets it, before it is mapped (a module with its patch area after the image)
+    char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", dir, m->name);
+    struct stat st; if (stat(path, &st)) die("stat %s", path);
+    return ((uint64_t)st.st_size + 0x3FFF) & ~0x3FFFull;
 }
 #endif
 
@@ -687,6 +746,7 @@ void load_modules(const char *dir, const char **names, int n) {
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
     FILE *nros = open_nros(dir);
     allocate_modules(n, nros);
+    g_nprofile = n;
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);

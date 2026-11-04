@@ -103,6 +103,70 @@ def pack(src, dst, reuse=False):
     return len(ents)
 
 
+def pack_layers(base, overlay, dst):
+    """One image of base (an image or a folder) with overlay's files laid over it, as Atmosphère's LayeredFS does: a file of overlay replaces the base's at the same path, its folders merge with
+    the base's. Used for mods (mod_apply.py). Returns the entry count."""
+    base, overlay, dst = os.fspath(base), os.fspath(overlay), os.fspath(dst)
+    root = {}   # name → dict (a directory) or (host path, offset, size) (a file; offset None for a whole host file)
+    if os.path.isfile(base):
+        with open(base, 'rb') as f:
+            magic, ioff, isz, n = HEAD.unpack(f.read(HEAD.size))
+            if magic != MAGIC: raise ValueError(f'{base}: not a RomFS image')
+            f.seek(ioff); raw = f.read(isz)
+        pool, e = raw[n * ENT.size:], [ENT.unpack_from(raw, k * ENT.size) for k in range(n)]
+        todo = [(0, root)]
+        while todo:
+            k, node = todo.pop()
+            for c in range(e[k][0], e[k][0] + e[k][1]):
+                a, b, no, nl, t, _ = e[c]; name = bytes(pool[no:no + nl])
+                if t == 0: node[name] = {}; todo.append((c, node[name]))
+                else: node[name] = (base, a, b)
+    def lay(path, node):   # a host folder over node
+        for name, p, isdir in children(path):
+            if isdir:
+                if not isinstance(node.get(name), dict): node[name] = {}
+                lay(p, node[name])
+            else: node[name] = (p, None, os.path.getsize(p))
+    if os.path.isdir(base): lay(base, root)
+    lay(overlay, root)
+    ents = [[b'', root, 0, 0]]   # name, dict or file, a, b: breadth-first, each directory's children sorted by name, as entries() lays them out
+    i = 0
+    while i < len(ents):
+        if isinstance(ents[i][1], dict):
+            kids = sorted(ents[i][1].items())
+            ents[i][2], ents[i][3] = len(ents), len(kids)
+            ents.extend([n_, v, 0, 0] for n_, v in kids)
+        i += 1
+    part, srcs = dst + '.part', {}
+    try:
+        with open(part, 'wb') as out:
+            out.write(b'\0' * HEAD.size)
+            off = HEAD.size
+            for ent in ents:
+                if isinstance(ent[1], dict): continue
+                path, at, size = ent[1]
+                f = srcs.get(path) if at is not None else None
+                if at is not None and f is None: f = srcs[path] = open(path, 'rb')
+                if f is None: f = open(path, 'rb')
+                if at is not None: f.seek(at)
+                left = size
+                while left:
+                    b = f.read(min(left, 8 << 20))
+                    if not b: raise RuntimeError(f'{path}: ends before the {size} bytes of a file in it')
+                    out.write(b); left -= len(b)
+                if at is None: f.close()
+                ent[2], ent[3] = off, size; off += size
+            pool, idx = bytearray(), bytearray()
+            for name, v, a, b in ents:
+                idx += ENT.pack(a, b, len(pool), len(name), 0 if isinstance(v, dict) else 1, 0); pool += name
+            out.write(idx); out.write(pool)
+            out.seek(0); out.write(HEAD.pack(MAGIC, off, len(idx) + len(pool), len(ents)))
+    finally:
+        for f in srcs.values(): f.close()
+    os.replace(part, dst)
+    return len(ents)
+
+
 def read_index(img):   # for tests and checks: {guest path: (is dir, offset, size)}
     with open(img, 'rb') as f:
         magic, ioff, isz, n = HEAD.unpack(f.read(HEAD.size))

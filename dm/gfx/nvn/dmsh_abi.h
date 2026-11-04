@@ -27,6 +27,8 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table (Mario Kart World's task shaders read slots 0 and 1 there)
+#define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table (its mesh shaders read slots 0 to 4)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
@@ -92,6 +94,11 @@
 #define DMSH_BORDER_K 0x10               // byte offset of sampler bit i's factors k (a float4) in the block: DMSH_BORDER_K + 16 i
 #define DMSH_BORDER_TWIN "_w"            // the suffix of a twin sampler member's name
 #define DMSH_BORDER_MEMBER "dm_border"   // the name of the block's member in the argument buffer
+// Shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py spill_shared): Ampere gives a compute shader up to 100 KB of it and Mario Kart World's declare 48 KB, Apple GPUs 32 KB.
+// Such a shader's shared arrays live in a device buffer instead, one slice (the binding's bytes, a multiple of 256) per threadgroup, threadgroup (x, y, z) of an (X, Y, Z) grid at (z Y + y) X + x
+#define DMSH_KIND_SPILL "spill"          // that buffer: the host gives each dispatch its own, of (threadgroups) x (the binding's bytes) (nvn_mtl.m spill_take)
+#define DMSH_SPILL_MEMBER "dm_spill"     // the name of its member in the argument buffer
+#define DMSH_SPILL_LIMIT 32768           // bytes of threadgroup memory a Metal kernel may declare; a kernel above it spills all of its shared arrays
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the <key>_bl libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)

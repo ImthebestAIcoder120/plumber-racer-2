@@ -50,6 +50,13 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [PR #190](https://github.com/seedds/nxnative/pull/190) independently found the shared SDK cut and the same 19 built-in compute shaders on 1.0.0. Its shader tables describe that build; this profile uses the 1.3.0 split. Its AudioOut-stop / FMOD finding is included as a general fix, with a guard preserving buffers queued before Start; the 1.3.0 run passed character selection before that fix.
 - Host tests pass, including synthetic VP8 / VP9 NV12 and RGBA decoding, AudioOut stop / queue stress and integer / float / millisecond / vsync frame-limit regressions. The graphics Python suite passes (41 tests, two skipped); Metal depth / stencil clear, stencil-view, read-only depth and upload-budget regressions pass. Rewriter patch, chain and documentation checks pass.
 
+## Luminescent Platinum
+
+- **Current: boots on the Mac.** Luminescent Platinum 2.2F (BD, for 1.3.0) packs with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --mod <mod folder>`, the folder holding the mod's `exefs/` and `romfs/`. A Mac run on 2026-11-01 reached the mod's own language screen at 60 fps with no red line; gameplay beyond it is not tested yet, and iOS is untested.
+- The mod is three parts. `exefs/94CEAE325C205C4B9D6F7235552F28FD.ips` is 155 records on 1.3.0's main (192 words); main keeps its build ID, its rewrite has the same sites and cuts, and the profile's build-gated fixes still apply (the Unity frame-rate field is not patched). `exefs/subsdk1` is the mod's code: 1,228 direct B/BL into 298 functions of main, and 106 IPS records branch into it, so it must sit at main+0x5708000 as Horizon lays the modules out; see [A mod's module branches into main at fixed distances](../../../docs/reference/packing.md#a-mods-module-branches-into-main-at-fixed-distances). `romfs/` replaces 2,197 files and adds 1,262 (1.4 GB), including `globalgamemanagers` and `resources.assets`.
+- `subsdk1` has no eh_frame_hdr and 106 x18 sites (four PC-relative); its 18 imports include eight weak newlib `__syscall_*` hooks, bound to 0 as on the Switch, and five symbols no module defines.
+- The split finds 14,439 stage shaders over the merged RomFS (14,441 on the plain game).
+
 ## Found on this game
 
 - SDK 11.4.3's instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area), with the cut keyed by the shared SDK build ID.
@@ -65,3 +72,4 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - First battle and later areas remain untested.
 - User testing on iOS remains required.
 - Recheck the intermittent Core Audio callback stalls during a long run on the final host build.
+- With Luminescent Platinum: [a mod's module branches into main at fixed distances](../../../docs/reference/packing.md#a-mods-module-branches-into-main-at-fixed-distances), [a module without eh_frame_hdr](../../../docs/reference/rewriter.md#a-module-without-eh_frame_hdr) and [a UnityFS bundle with bytes after its end](../../../docs/reference/shaders.md#a-unityfs-bundle-with-bytes-after-its-end).

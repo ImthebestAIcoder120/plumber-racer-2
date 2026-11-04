@@ -32,6 +32,10 @@ modules	main subsdk0 sdk
 romfs_marker	UI/cmn/movie/StaffCredits.mp4
 zip_store	.bfres:.bfstm:.bslnk:.mp4:.ptcl:.sarc:.szs:.webm:.metallib
 
+# ---- Touch controls ----
+# the racing layout: gas / brake pedals, drift (A + R) and item (A + L), so the kart keeps accelerating, look back (X), the floating stick (a mushroom knob) steers
+pad_style	kart
+
 # ---- Memory ----
 # no system resource: the game sets a 3.03 GB heap (pool − 64 MB) in the 4 GB layout's 3.25 GB heap region; about 2.4 GB resident and 1.26 GB of Metal allocations in a race on the Mac
 mem_reserve	0x100000000

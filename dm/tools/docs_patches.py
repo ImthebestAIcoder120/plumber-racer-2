@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource'}
+NOT_SWITCHES = {'pad_layout', 'pad_style', 'pad_theme', 'depth_mode', 'mem_used', 'sys_resource'}
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -105,6 +105,14 @@ SWITCH_BINDING = [
      'why': 'unified memory semantics; off by default because a flushed range could cover an image a shader writes: tracking GPU writes would make it safe for every game'}),
     ('tex_dirty_upload', '', {'what': 'CPU-written textures uploaded without a flush', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'as tex_flush_upload, for pools the CPU writes without a flush'}),
+    ('zero_release', '', {'what': 'all-zero guest pages given back to the system', 'now': 'game', 'goal': 'host', 'purpose': 'memory',
+     'why': 'lossless for any game; off by default until its background scan (about a second of one core per 15 s for 4 GB) is measured on other games and on an iPhone'}),
+    ('mem_file', '', {'what': "guest memory in a shared mapping of a file, out of the process's footprint and paged to the file under pressure", 'now': 'game', 'goal': 'host', 'purpose': 'memory',
+     'why': 'off by default: iOS wires a zero-copy buffer whole, and over file pages that takes minutes, so it needs a game whose large pools have no buffer'}),
+    ('tex_soft', '', {'what': 'large block-compressed textures kept without their finest level, packaged uploads on the CPU', 'now': 'game', 'goal': 'game', 'purpose': 'memory',
+     'why': 'a loss of detail chosen for a game that does not fit a device otherwise'}),
+    ('tex_release', '', {'what': "the memory of uploaded sparse texture pages given back once their tiles hold them", 'now': 'game', 'goal': 'host', 'purpose': 'memory',
+     'why': "safe while the game writes a streamed page whole and never reads it back on the CPU: tracking partial writes (a readback of the tile into the page first) would make it safe for every game"}),
     ('tex_dyn_slots', '', {'what': "buffer-texture handles indexed through c2's tables", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
      'why': "right only where the handle comes from c2's tables: the translator could prove that per shader"}),
     ('feedback_snap', '', {'what': 'draws that sample their own colour attachment read a snapshot', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',

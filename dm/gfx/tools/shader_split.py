@@ -76,7 +76,7 @@ def sph_stage(code):
     if len(code) < 0x34: return None   # shorter than the header and SPH word 0
     w = struct.unpack_from('<I', code, 0x30)[0]
     return 'vs' if (w >> 10) & 0xf == 0 and w & 0x1f == 1 else SPH_STAGE.get((w >> 10) & 0xf)
-STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute'}   # shader_map.tsv column 3
+STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute', 'ts': 'task', 'ms': 'mesh'}   # shader_map.tsv column 3 (task and mesh: NVN2 only)
 
 def red(msg): sys.exit('[RED] ' + msg)
 
@@ -155,13 +155,17 @@ def bnsh_shaders(d, base, label):
             if not sc: continue
             pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
+            if nvn2_ctl(ctl) and len(ctl) > 0x56 and ctl[0x56] in (6, 7): st = NVN2_STAGE[ctl[0x56]]   # a task / mesh shader sits in another stage's slot (its stage byte says which)
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
-def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute by the control section's stage byte (+0x56: 5), else the SPH at the code area's start (no code header)
-    if len(ctl) > 0x56 and ctl[0x56] == 5: return 'cs'
+# an NVN2 shader's stage: compute, task or mesh by the control section's stage byte (+0x56: 5, 6, 7), else the SPH at the code area's start (no code header).
+# A task shader's SPH says vertex and a mesh shader's domain (Mario Kart World: 7 task and 18 mesh shaders, read as vertex and domain shaders before)
+NVN2_STAGE = {5: 'cs', 6: 'ts', 7: 'ms'}
+def nvn2_stage(ctl, code):
+    if len(ctl) > 0x56 and ctl[0x56] in NVN2_STAGE: return NVN2_STAGE[ctl[0x56]]
     return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
 
 def bahs_shaders(d, label):
@@ -2793,6 +2797,10 @@ def main():
         if rec.find(CTL_MAGIC) != 0x38 + len(code): red(f'key {key}: the control magic appears in the code area, dmsh_build would split the record wrongly')
         if rec.count(b'BTCDBTCD') != 1: red(f'key {key}: the record separator appears inside the record')
         rows.append((name, len(recs[name]), STAGE_NAME[st], key, where)); recs[name].append(bytes(rec)); stat[st] += 1
+        if st in ('ts', 'ms'):   # NVN2 task / mesh: the thread count at +0x58 (u16: 32 or 8 in Mario Kart World), one dimension; their stage buffer is the build's (dmsh_meshstage.py)
+            x = struct.unpack_from('<H', ctl, 0x58)[0]
+            if not x: red(f'{STAGE_NAME[st]} shader {key}: control +0x58 thread count is 0 ({where})')
+            facts[key] = {'local': [x, 1, 1], 'shared': 0}
         if st == 'cs':
             # NVN2: the thread group at +0x58 (32 1 1 in Donkey Kong Bananza's effects); shared memory taken from +0x64, not yet seen nonzero (unverified)
             at = (0x58, 0x64) if nvn2_ctl(ctl) else (0x748, 0x754)

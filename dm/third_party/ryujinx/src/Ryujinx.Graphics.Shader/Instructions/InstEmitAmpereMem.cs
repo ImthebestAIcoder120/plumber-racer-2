@@ -54,6 +54,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -95,6 +96,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             alu(0x124, InstName.Out, AOut);
             x(0x923, InstName.Isberd, AIsberd, N);
+            // ISBEWR [Ra + imm], Rb: a write into the stage buffer entry ISBERD reads (AIsbewr)
+            x(0x927, InstName.Isberd, AIsbewr, N, writesRd: false);
             x(0x34e, InstName.Lepc, ALepc, N);
             x(0x357, InstName.Nop, ANop, N, writesRd: false);
             x(0x957, InstName.Nop, ANop, N, writesRd: false);
@@ -116,9 +119,71 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // ISBERD Rd, [Ra + imm] / ISBEWR [Ra + imm], Rb (encoded as Mesa's NAK writes them, nak/sm70_encode.rs): the offset 40..56, the size 74..76 (8, 16 or 32 bits),
+        // the access 76..78 (0 map, 3 attributes), skew 78, output 79. In a task or mesh shader they read and write the stage's buffer: Mario Kart World's mesh shaders
+        // write each vertex's attributes and their primitives' indices with them, and its task shaders their payload and the count of mesh workgroups. The translator
+        // keeps the three regions in shared memory (QueryAmpereIsbe) and the build's mesh rewrite reads them at the end (dmsh_meshstage.py). The offsets the shader
+        // computes are used as they are: the skew layout of per-vertex attributes (32 vertices a group, a 128-byte row per attribute word) is the build's to read
+        private static bool AIsbe(EmitterContext context, AmpereOp x, bool store)
+        {
+            int[] isbe = context.TranslatorContext.GpuAccessor.QueryAmpereIsbe();
+
+            if (isbe == null || isbe.Length < 3)
+            {
+                return false;
+            }
+
+            int access = x.Bits(76, 78), size = x.Bits(74, 76);
+
+            // The map is byte-addressed (the primitive count as a word at byte 3, each index a byte from byte 4): each of its bytes gets a word here, so the threads
+            // writing a primitive's indices never share a word (a byte store into shared memory is a compare-and-swap loop) and the count at 3 overlaps no index
+            if (access == 0)
+            {
+                Operand word = context.IAdd(context.IAdd(AGpr(x.Ra), Const(x.Bits(40, 56))), Const(isbe[1] / 4));
+                int id = context.ResourceManager.SharedMemoryId;
+
+                if (store)
+                {
+                    Operand v = AGpr(x.Rb);
+                    context.Store(StorageKind.SharedMemory, id, word, size == 0 ? context.BitwiseAnd(v, Const(0xff)) : size == 1 ? context.BitwiseAnd(v, Const(0xffff)) : v);
+                }
+                else if (x.Rd < RegisterConsts.RegisterZeroIndex)
+                {
+                    context.Copy(Register(x.Rd, RegisterType.Gpr), context.Load(StorageKind.SharedMemory, id, word));
+                }
+
+                return true;
+            }
+
+            int region = x.Bit(79) ? isbe[0] : isbe[2];
+            LsSize2 ls = size switch { 0 => LsSize2.U8, 1 => LsSize2.U16, _ => LsSize2.B32 };
+            Operand addr = context.IAdd(AGpr(x.Ra), Const(region));
+
+            if (store)
+            {
+                EmitStore(context, StorageKind.SharedMemory, ls, addr, x.Rb, x.Bits(40, 56));
+            }
+            else
+            {
+                EmitLoad(context, StorageKind.SharedMemory, ls, addr, x.Rd, x.Bits(40, 56));
+            }
+
+            return true;
+        }
+
+        public static void AIsbewr(EmitterContext context)
+        {
+            AIsbe(context, new AmpereOp(context.CurrOp), true);   // elsewhere (no stage buffer) nothing reads what it writes
+        }
+
         public static void AIsberd(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+
+            if (AIsbe(context, x, false))
+            {
+                return;
+            }
 
             if (x.Rd < RegisterConsts.RegisterZeroIndex)
             {
@@ -456,6 +521,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+        }
+
+        // SURED: SUATOM without a result (the same handle, dimension, operation and size fields); Mario Kart World's compute shader ab77eaee44cfef88 counts with SURED.ADD
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+            int op = x.Bits(87, 91);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SURED handle in bank {cbufSlot}");
+            }
+
+            if (op > (int)RedOp.Xor)
+            {
+                throw AFail(context, $"SURED operation {op}");
+            }
+
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)op, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, false, isBindless: false);
         }
 
         // BAR.SYNC: the workgroup barrier

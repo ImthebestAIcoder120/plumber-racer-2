@@ -352,6 +352,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - BALL x PIT keeps most of its shaders in the player's loose serialized files (`resources.assets`, `sharedassets1.assets`, the built-in resources), which have no type trees; they borrow the `Shader` tree its 10 shader bundles carry (`shader_split.py` defers a file that raises `NoTree` to a second pass), so it needed no layout either.
 - **Found on:** [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md) (Unity 6000.0.50f1): 2,450 stage shaders: 1,189 vertex, 1,193 pixel, 67 compute and one geometry shader, which does not build; 11 of them are the player's own in `main`. [BALL x PIT](../../dm/games/010086A022444000/README.md) (6000.0.62f1): 38,099 shaders, most of them in the loose files. [Silver Pines](../../dm/games/0100D5B026844000/README.md) (6000.3.15f1): 56,386 stage shaders in its Addressables bundles, read with no change.
 
+### A UnityFS bundle with bytes after its end
+
+- **Symptom:** `[RED] 1 file(s) could not be read, their shaders are left out (first: …: LZ4BlockError: Decompression failed …)` for a bundle that the game reads.
+- **Cause:** a bundle with its blocks info at the end (flag 0x80) was read from the end of the file, but the header's size ends it earlier: Luminescent Platinum 2.2F's `pm0487_12_00` is 195,602 bytes with a header size of 194,937. The 665 bytes after it hold an older blocks info whose block sizes do not match the data.
+- **Fix:** `unityfs.py` takes the blocks info from the end the header's size gives, when that lies within the file.
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md#luminescent-platinum) with Luminescent Platinum 2.2F.
+
 ### Unity ComputeShader objects
 
 - **Symptom:** the 3D battle scene was black behind a correct UI, with `[RED] shader 854a8afc9d07f88d is not in the shader map` and `the dispatched program has no compute shader`.

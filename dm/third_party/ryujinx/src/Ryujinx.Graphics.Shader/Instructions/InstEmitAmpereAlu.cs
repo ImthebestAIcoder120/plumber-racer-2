@@ -562,6 +562,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, src, uniform: true);
         }
 
+        // UP2UR URd, UPR, URa (24..29), mask (32..63): P2R on the uniform datapath. The uniform predicates UP0..UP6 go into byte 76..77 of URa under the mask
+        // (Mario Kart World's shaders save them with masks 0x1, 0x8 and 0x40 around calls; Pokemon Pokopia's with URZ, 1)
+        public static void AUp2ur(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int ra = x.Bits(24, 30);
+            int shift = x.Bits(76, 78) * 8;
+
+            Operand srcA = ra == RegisterConsts.UniformZeroIndex ? Const(0) : Register(ra, RegisterType.Uniform);
+            Operand mask = Const(((int)x.Imm32 & 0xff) << shift);
+            Operand insert = Const(0);
+
+            for (int i = 0; i < RegisterConsts.UniformPredsCount; i++)
+            {
+                insert = context.BitwiseOr(insert, context.ConditionalSelect(Register(i, RegisterType.UniformPredicate), Const(1 << (i + shift)), Const(0)));
+            }
+
+            ASet(context, x, context.BitwiseOr(context.BitwiseAnd(srcA, context.BitwiseNot(mask)), context.BitwiseAnd(insert, mask)), uniform: true);
+        }
+
         // R2UR URd, Ra
         public static void AR2ur(EmitterContext context)
         {
@@ -1270,20 +1290,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand mask = x.Opcode == 0x803 ? Const((int)x.Imm32) : Register(x.Rb, RegisterType.Gpr);
 
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
-        }
-
-        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
-        // is P2R's form, not seen here)
-        public static void AUp2ur(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
-
-            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
-            {
-                throw AFail(context, "UP2UR with a merge source or another mask");
-            }
-
-            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

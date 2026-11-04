@@ -4,7 +4,7 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) plays on the Mac, packed from a dump of the game; iPhone and iPad are untested.
+**[Mario Kart World](dm/games/0400C3F00006E000/README.md)** runs on an iPhone 18 Pro in LiveContainer: version 1.0.0 only, from your own dump, with its build and install steps in its note. Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) plays on the Mac, packed from a dump of the game; iPhone and iPad are untested.
 
 ## Acknowledgements
 
@@ -16,6 +16,7 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 - **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
 - **[glslang](https://github.com/KhronosGroup/glslang)** compiles the GLSL of OpenGL games to SPIR-V for it.
+- **[kartnative](https://github.com/pahorema/kartnative)** (MIT): Mario Kart World's sparse texture checks, terrain tiles at their first sample, and its memory settings.
 - **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
 
 ## How to play

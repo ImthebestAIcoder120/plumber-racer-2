@@ -68,6 +68,7 @@ enum {
     RO_C_TABLE, RO_C_PSO, RO_C_DISPATCH, RO_C_DISPATCH_IND, RO_C_COPY_BB, RO_C_COPY_BT, RO_C_COPY_BT_OPT, RO_C_COPY_TB, RO_C_COPY_TB_OPT, RO_C_COPY_TT, RO_C_FILL,
     RO_T_ADDR, RO_T_TEX, RO_T_SAMP,
     RO_LABEL, RO_R_TS, RO_C_TS,   // diagnostics: DM_NVN_ENC_LABEL, DM_NVN_GPUPROF
+    RO_TEX_MAP,   // a placement sparse texture's tile mappings (nvn_mtl.m sparse_upload): the texture, the heap (nil to unmap), the operations as NSData
     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
 };
 typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
@@ -121,6 +122,11 @@ static void rec_exec(const rec_t *r) {
         if (r->op == RO_COMMIT) g_rx_cb = nil;
         break; }
     case RO_SIGNAL: [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;
+    case RO_TEX_MAP: { NSData *ops = rec_id(a[2]);
+        pthread_mutex_lock(&g_res_mu);
+        [g_q4 updateTextureMappings:rec_id(a[0]) heap:rec_id(a[1]) operations:ops.bytes count:ops.length / sizeof(MTL4UpdateSparseTextureMappingOperation)];
+        pthread_mutex_unlock(&g_res_mu);
+        break; }
     case RO_RE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb renderCommandEncoderWithDescriptor:rec_id(a[0])]; break;
     case RO_CE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb computeCommandEncoder]; break;
     case RO_END: [(id<MTL4CommandEncoder>)e endEncoding]; g_rx_enc = nil; break;
@@ -146,7 +152,7 @@ static void rec_exec(const rec_t *r) {
     case RO_R_DRAW_IND: [(id<MTL4RenderCommandEncoder>)e drawPrimitives:a[0] indirectBuffer:a[1]]; break;
     case RO_R_DRAW_IDX: [(id<MTL4RenderCommandEncoder>)e drawIndexedPrimitives:a[0] indexCount:a[1] indexType:a[2] indexBuffer:a[3] indexBufferLength:a[4] instanceCount:a[5] baseVertex:(NSInteger)a[6] baseInstance:a[7]]; break;
     case RO_R_DRAW_IDX_IND: [(id<MTL4RenderCommandEncoder>)e drawIndexedPrimitives:a[0] indexType:a[1] indexBuffer:a[2] indexBufferLength:a[3] indirectBuffer:a[4]]; break;
-    case RO_R_MESH: [(id<MTL4RenderCommandEncoder>)e drawMeshThreadgroups:MTLSizeMake(a[0], 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(a[1], 1, 1)]; break;
+    case RO_R_MESH: [(id<MTL4RenderCommandEncoder>)e drawMeshThreadgroups:MTLSizeMake(a[0], 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(a[2] ? a[2] : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(a[1], 1, 1)]; break;
     case RO_R_STORE_C: [(id<MTL4RenderCommandEncoder>)e setColorStoreAction:a[0] atIndex:a[1]]; break;
     case RO_R_STORE_D: [(id<MTL4RenderCommandEncoder>)e setDepthStoreAction:a[0]]; break;
     case RO_R_STORE_S: [(id<MTL4RenderCommandEncoder>)e setStencilStoreAction:a[0]]; break;
@@ -284,7 +290,7 @@ static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable clas
     rec_t *r = rec_put(RO_R_DRAW_IDX, 0); r->a[0] = p; r->a[1] = n; r->a[2] = t; r->a[3] = g; r->a[4] = len; r->a[5] = i; r->a[6] = (uint64_t)bv; r->a[7] = bi; }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)p indexType:(MTLIndexType)t indexBuffer:(uint64_t)g indexBufferLength:(NSUInteger)len indirectBuffer:(uint64_t)ind {
     rec_t *r = rec_put(RO_R_DRAW_IDX_IND, 0); r->a[0] = p; r->a[1] = t; r->a[2] = g; r->a[3] = len; r->a[4] = ind; }
-- (void)drawMeshThreadgroups:(MTLSize)g threadsPerObjectThreadgroup:(MTLSize)o threadsPerMeshThreadgroup:(MTLSize)m { (void)o; rec_t *r = rec_put(RO_R_MESH, 0); r->a[0] = g.width; r->a[1] = m.width; }
+- (void)drawMeshThreadgroups:(MTLSize)g threadsPerObjectThreadgroup:(MTLSize)o threadsPerMeshThreadgroup:(MTLSize)m { rec_t *r = rec_put(RO_R_MESH, 0); r->a[0] = g.width; r->a[1] = m.width; r->a[2] = o.width; }
 - (void)setColorStoreAction:(MTLStoreAction)a atIndex:(NSUInteger)i { rec_t *r = rec_put(RO_R_STORE_C, 0); r->a[0] = a; r->a[1] = i; }
 - (void)setDepthStoreAction:(MTLStoreAction)a { rec_put(RO_R_STORE_D, 0)->a[0] = a; }
 - (void)setStencilStoreAction:(MTLStoreAction)a { rec_put(RO_R_STORE_S, 0)->a[0] = a; }
@@ -343,5 +349,12 @@ static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
     if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+}
+// A placement sparse texture's tile mappings: queued where they are recorded, so before the upload batch that writes the tiles (its commit comes later in the stream)
+static void rec_tex_map(id tex, id heap, NSData *ops) {
+    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_TEX_MAP, 3); r->a[0] = rec_obj(tex); r->a[1] = heap ? rec_obj(heap) : 0; r->a[2] = rec_obj(ops); return; }
+    pthread_mutex_lock(&g_res_mu);
+    [g_q4 updateTextureMappings:tex heap:heap operations:ops.bytes count:ops.length / sizeof(MTL4UpdateSparseTextureMappingOperation)];
+    pthread_mutex_unlock(&g_res_mu);
 }
 static void rec_signal(id ev, uint64_t v) { if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_SIGNAL, 1); r->a[0] = rec_obj(ev); r->a[1] = v; } else [g_q4 signalEvent:ev value:v]; }

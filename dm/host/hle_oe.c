@@ -152,7 +152,13 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Donkey Kong Bananza keeps it as a quality tier: a byte of its graphics
 // settings (+0x1c7, main+0x549348, next to the handheld flag it takes from the operation mode at +0x1c4), and an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13)
 // goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
+// DM_GRAPHICS_SCALE=0 / 1 / 2 answers that tier whatever the mode, to measure what a game does with it
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) {
+    const char *e = getenv("DM_GRAPHICS_SCALE");
+    if (e && *e >= '0' && *e <= '2' && !e[1]) { static int n; if (!n++) LOG("oe::GetCurrentGraphicsScale answers %s (DM_GRAPHICS_SCALE)", e); return *e - '0'; }
+    static int m; if (!m++) LOG("oe::GetCurrentGraphicsScale asked: answers %d", opmode() == 1);
+    return opmode() == 1;
+}
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
