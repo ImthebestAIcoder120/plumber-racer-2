@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game, SDK 19.3.3 built for the Switch 2 (`Ounce`), NVN2 API 231.16. Nintendo EPD's engine (sead / agl / gsys), modules `main`, `subsdk0` and `sdk`. **Runs on an iPhone 18 Pro in LiveContainer**: a whole Grand Prix cup has finished there, with about 3.9 GB of footprint against the phone's 8,192 MiB limit. Nothing from the game is in this repository: you need your own dump. The [install tutorial](../../../TUTORIAL.md) goes through every step.
+A Switch 2 game, SDK 19.3.3 built for the Switch 2 (`Ounce`), NVN2 API 231.16. Nintendo EPD's engine (sead / agl / gsys), modules `main`, `subsdk0` and `sdk`. **Runs on an iPhone 18 Pro in LiveContainer**: a whole Grand Prix cup has finished there, with about 3.9 GB of footprint against the phone's 8,192 MiB limit. Nothing from the game is in this repository: you need your own dump. It also runs on a Mac with Apple silicon, at about 50 fps in a race on an M5 with 16 GB. The [install tutorial](../../../TUTORIAL.md) goes through every step for both.
 
 ## Required game version
 

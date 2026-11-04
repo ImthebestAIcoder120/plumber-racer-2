@@ -1,6 +1,6 @@
 # Plumber Racer 2: install tutorial
 
-Plumber Racer 2 runs Mario Kart World on an iPhone. This guide takes you from your own copy of the game to playing it: you build an app on a Mac, install it in LiveContainer, and copy the game files across.
+Plumber Racer 2 runs Mario Kart World on an iPhone or a Mac. This guide takes you from your own copy of the game to playing it on an iPhone: you build an app on a Mac, install it in LiveContainer, and copy the game files across. To play on the Mac itself, which is simpler, follow Steps 1 to 3 and then [Playing on a Mac](#playing-on-a-mac).
 
 **This repository has no game files, keys or ready-made apps.** You need your own dump of the game. The app and the `RomFS.img` file you make here contain your game, so keep them to yourself.
 
@@ -180,6 +180,26 @@ The touch controls are made for racing:
 Sliding your thumb between gas, drift and item keeps A held. The camera (right stick) has no touch control.
 
 Saves are in the app's Documents folder.
+
+## Playing on a Mac
+
+The game also runs on a Mac with Apple silicon. There is nothing to sideload or copy, because the Mac app carries the game files inside it.
+
+1. Follow Steps 1 to 3 above.
+2. Build the Mac app, from the repository folder, with the path to your game folder:
+
+   ```bash
+   python3 scripts/build_ipa_from_nsp.py "$HOME/Games/Mario Kart World" --platform mac-app
+   ```
+
+3. Open `Mario Kart World.app` from your game folder. It is about 23 GB and works from any folder once built. The first time you open it, macOS can sit silently for over a minute while it scans the app, so give it time.
+4. A settings window appears before the game starts.
+
+**What to expect:** tested on an M5 Mac with 16 GB of memory, a race runs at about 50 fps. The game is heavy on memory, and a Mac that runs short starts swapping, slows right down and can become hard to use. Close other apps before you play, and quit the game if the Mac starts to struggle.
+
+The touch controls are on the iPhone only. On the Mac you need a controller, and playing this game with one has not been tested yet.
+
+The log is at `~/Library/Logs/nxnative/0400C3F00006E000.log`.
 
 ## If something goes wrong
 
