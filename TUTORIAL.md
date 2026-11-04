@@ -11,7 +11,7 @@ Plumber Racer 2 runs Mario Kart World on an iPhone or a Mac. This guide takes yo
 | | |
 |---|---|
 | **The game** | Your own dump of Mario Kart World **version 1.0.0**: the base game with no update and no DLC |
-| **A Mac** | macOS 26.6 or later, Apple silicon, Xcode 27.2, and about 45 GB free |
+| **A Mac** | macOS 26.6 or later, Apple silicon, Xcode 27.2, and about 50 GB free (22 GB for the dump, 27 GB for the build) |
 | **An iPhone** | Tested only on an iPhone 18 Pro, with about 28 GB free |
 | **LiveContainer** | Installed on the iPhone. See [LiveContainer's own instructions](https://github.com/LiveContainer/LiveContainer) |
 
@@ -112,7 +112,7 @@ From the repository folder, run this with the path to your game folder:
 python3 scripts/build_ipa_from_nsp.py "$HOME/Games/Mario Kart World" --platform ios --romfs separate
 ```
 
-No `prod.keys` is needed for a dump. The first build compiles 11,561 shaders, which takes about 20 minutes on an M5. Later builds reuse them.
+No `prod.keys` is needed for a dump. The first build compiles 11,561 shaders, which takes 20 to 30 minutes on an M5, and your Mac may be slow during that time. Later builds reuse them and take about a minute.
 
 When it finishes, your game folder holds the two files you need:
 
@@ -120,6 +120,10 @@ When it finishes, your game folder holds the two files you need:
 |---|---|---|
 | `MarioKartWorld.ipa` | about 690 MB | The app |
 | `0400C3F00006E000_build/extract/v0/RomFS.img` | 21.7 GB | The game files |
+
+The script's last lines suggest a `scripts/push_romfs.sh` command. Skip it: that's for apps installed directly on the phone, and with LiveContainer you copy the file by hand in Step 6.
+
+A blank home-screen icon is normal too, because a dump has no icon data.
 
 ## Step 5: Install the app
 
@@ -161,7 +165,9 @@ The upper and lower case in the name doesn't matter.
 
 ## Step 7: Play
 
-Start the game from LiveContainer. The first launch builds its pipelines for about 30 seconds behind a progress screen.
+Start the game from LiveContainer. A settings screen comes first: tap **Play**. The first launch then builds its pipelines for about 30 seconds behind a progress screen.
+
+A frame-rate counter is on by default. To hide it, put a text file named `env.txt` in the same Documents folder, containing the line `DM_SHOW_FPS=0`.
 
 The touch controls are made for racing:
 

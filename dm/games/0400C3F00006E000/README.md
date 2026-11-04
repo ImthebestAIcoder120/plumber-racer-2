@@ -18,7 +18,7 @@ The patches are made for these exact modules, so another version will not work u
 
 ## Build it
 
-You need a Mac with the tools in the main [README](../../../README.md#how-to-play), about 45 GB free for the game files and the build, and your own dump. No keys are needed for a dump.
+You need a Mac with the tools in the main [README](../../../README.md#how-to-play), about 50 GB free for the game files and the build, and your own dump. No keys are needed for a dump.
 
 1. Lay the dump out like this (the folder name is yours):
    ```
@@ -26,7 +26,7 @@ You need a Mac with the tools in the main [README](../../../README.md#how-to-pla
      base/exefs/   main, main.npdm, sdk, subsdk0, rtld
      base/romfs/   the game's files
    ```
-2. Build the IPA. The first build compiles 11,561 shaders, about 20 minutes on an M5; later builds reuse them:
+2. Build the IPA. The first build compiles 11,561 shaders, 20 to 30 minutes on an M5; later builds reuse them:
    ```bash
    python3 scripts/build_ipa_from_nsp.py "Mario Kart World" --platform ios --romfs separate
    ```
