@@ -1,0 +1,50 @@
+name: Build Plumber Racer 2 iOS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Install Dependencies
+        run: |
+          brew install xcodegen zstd glslang
+          brew install --cask dotnet-sdk
+
+      - name: Set up Python Virtual Environment
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
+
+      - name: Decrypt and Extract Game Dump
+        env:
+          ROM_PASS: ${{ secrets.ROM_PASSWORD }}
+        run: |
+          # Unpacks your uploaded MKW.zip into the expected home games directory path
+          mkdir -p "$HOME/Games"
+          unzip -P "$ROM_PASS" MKW.zip -d "$HOME/Games/"
+
+      - name: Build iOS IPA Package
+        run: |
+          source .venv/bin/activate
+          python3 scripts/build_ipa_from_nsp.py "$HOME/Games/Mario Kart World" --platform ios --romfs separate
+
+      - name: Upload Compiled IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarioKartWorld-IPA
+          path: MarioKartWorld.ipa
